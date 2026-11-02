@@ -2,15 +2,24 @@ package com.example.bootanim
 
 import android.app.Activity
 import android.content.Intent
+import android.content.res.ColorStateList
+import android.content.res.Configuration
 import android.graphics.*
+import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.RippleDrawable
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.util.TypedValue
+import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
+import android.view.ViewOutlineProvider
 import android.view.WindowInsets
+import android.view.WindowInsetsController
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -18,13 +27,36 @@ import java.util.zip.ZipInputStream
 
 class Part(val name: String, val loop: Int, val pause: Int, val frames: List<ByteArray>)
 
+class Pal(val dark: Boolean, val bg: Int, val muted: Int, val btn: Int, val onBtn: Int, val ripple: Int)
+
 class AnimView(a: Activity) : View(a) {
     var bmp: Bitmap? = null
     var w = 1; var h = 1
+    var hint = ""
+    private val dens = a.resources.displayMetrics.density
     private val paint = Paint(Paint.FILTER_BITMAP_FLAG)
+    private val hintPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = 0xFFB0B0B0.toInt(); textAlign = Paint.Align.CENTER
+        textSize = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, 16f, a.resources.displayMetrics)
+    }
+    init {
+        outlineProvider = object : ViewOutlineProvider() {
+            override fun getOutline(v: View, o: Outline) {
+                o.setRoundRect(0, 0, v.width, v.height, 28 * dens)
+            }
+        }
+        clipToOutline = true
+    }
     override fun onDraw(c: Canvas) {
         c.drawColor(Color.BLACK)
-        val b = bmp ?: return
+        val b = bmp
+        if (b == null) {
+            val lines = hint.split("\n")
+            val lh = hintPaint.textSize * 1.4f
+            var y = height / 2f - (lines.size - 1) * lh / 2f + hintPaint.textSize / 3f
+            for (l in lines) { c.drawText(l, width / 2f, y, hintPaint); y += lh }
+            return
+        }
         val s = minOf(width / w.toFloat(), height / h.toFloat())
         val fw = b.width * s; val fh = b.height * s
         val l = (width - fw) / 2; val t = (height - fh) / 2
@@ -33,9 +65,11 @@ class AnimView(a: Activity) : View(a) {
 }
 
 class MainActivity : Activity() {
+    private lateinit var root: LinearLayout
     private lateinit var view: AnimView
     private lateinit var info: TextView
     private lateinit var playBtn: Button
+    private val buttons = ArrayList<Button>()
     private var parts = listOf<Part>()
     private var fps = 30
     private var p = 0; private var f = 0; private var l = 0; private var wait = 0
@@ -43,33 +77,83 @@ class MainActivity : Activity() {
     private val handler = Handler(Looper.getMainLooper())
     private val ticker = Runnable { tick() }
 
+    private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+
+    private fun palette(): Pal {
+        val dark = (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
+            Configuration.UI_MODE_NIGHT_YES
+        if (Build.VERSION.SDK_INT >= 31) {
+            fun c(id: Int) = getColor(id)
+            return if (dark) Pal(true, c(android.R.color.system_neutral1_900), c(android.R.color.system_neutral2_300),
+                c(android.R.color.system_accent1_700), c(android.R.color.system_accent1_100), c(android.R.color.system_accent1_300))
+            else Pal(false, c(android.R.color.system_neutral1_10), c(android.R.color.system_neutral2_600),
+                c(android.R.color.system_accent1_100), c(android.R.color.system_accent1_900), c(android.R.color.system_accent1_300))
+        }
+        return if (dark) Pal(true, 0xFF1C1B1F.toInt(), 0xFFCAC4D0.toInt(), 0xFF4A4458.toInt(), 0xFFE8DEF8.toInt(), 0xFFD0BCFF.toInt())
+        else Pal(false, 0xFFFFFBFE.toInt(), 0xFF49454F.toInt(), 0xFFE8DEF8.toInt(), 0xFF1D192B.toInt(), 0xFF6750A4.toInt())
+    }
+
+    private fun pill(color: Int) = GradientDrawable().apply {
+        shape = GradientDrawable.RECTANGLE; cornerRadius = dp(100).toFloat(); setColor(color)
+    }
+
+    private fun applyColors() {
+        val pal = palette()
+        root.setBackgroundColor(pal.bg)
+        info.setTextColor(pal.muted)
+        val rip = ColorStateList.valueOf((pal.ripple and 0x00FFFFFF) or 0x40000000)
+        for (b in buttons) {
+            b.setTextColor(pal.onBtn)
+            b.background = RippleDrawable(rip, pill(pal.btn), pill(Color.BLACK))
+        }
+        val m = WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS or WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS
+        window.insetsController?.setSystemBarsAppearance(if (pal.dark) 0 else m, m)
+    }
+
     override fun onCreate(s: Bundle?) {
         super.onCreate(s)
-        val root = LinearLayout(this).apply {
+        root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(0xFF1C1C1E.toInt())
+            gravity = Gravity.CENTER_HORIZONTAL
             setOnApplyWindowInsetsListener { v, i ->
                 val b = i.getInsets(WindowInsets.Type.systemBars())
                 v.setPadding(b.left, b.top, b.right, b.bottom); i
             }
         }
-        view = AnimView(this)
-        root.addView(view, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
+        view = AnimView(this).apply { hint = "Tap Open and choose\na bootanimation.zip" }
+        root.addView(view, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f).apply {
+            setMargins(dp(16), dp(8), dp(16), dp(8))
+        })
         info = TextView(this).apply {
-            setTextColor(0xFFAAAAAA.toInt()); setPadding(24, 16, 24, 8)
-            text = "Tap Open and choose a bootanimation.zip"
+            gravity = Gravity.CENTER; textSize = 13f
+            setPadding(dp(24), dp(8), dp(24), dp(12))
+            text = "No animation loaded"
         }
-        root.addView(info)
-        val bar = LinearLayout(this)
+        root.addView(info, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+        val bar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER
+            setPadding(dp(8), dp(4), dp(8), dp(16))
+        }
         fun btn(label: String, a: () -> Unit) = Button(this).apply {
-            text = label; setOnClickListener { a() }
-        }.also { bar.addView(it, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f)) }
+            text = label; isAllCaps = false; textSize = 14f; stateListAnimator = null
+            minWidth = 0; minimumWidth = 0; minHeight = 0; minimumHeight = 0
+            setPadding(dp(18), 0, dp(18), 0); setOnClickListener { a() }
+        }.also {
+            buttons.add(it)
+            bar.addView(it, LinearLayout.LayoutParams(WRAP_CONTENT, dp(44)).apply { setMargins(dp(4), 0, dp(4), 0) })
+        }
         btn("Open") { pick() }
         playBtn = btn("Pause") { toggle() }
         btn("Restart") { start() }
         btn("Next") { skip() }
-        root.addView(bar)
+        root.addView(bar, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
         setContentView(root)
+        applyColors()
+    }
+
+    override fun onConfigurationChanged(c: Configuration) {
+        super.onConfigurationChanged(c)
+        applyColors()
     }
 
     private fun pick() {
